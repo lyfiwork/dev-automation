@@ -1,3 +1,4 @@
+
 ---
 - name: Provision VM and MongoDB
   hosts: all
@@ -7,8 +8,8 @@
   vars:
     mongodb_image: "docker.io/mongodb/mongodb-community-server:8.0.32-ubi9-slim"
     mongodb_container_name: "mongodb"
+    mongodb_volume_name: "mongodb-data"
     mongodb_port: 27017
-    mongodb_data_dir: "/opt/mongodb/data"
 
   pre_tasks:
 
@@ -30,20 +31,33 @@
         name: podman
         state: present
 
-    - name: Create MongoDB persistent data directory
-      ansible.builtin.file:
-        path: "{{ mongodb_data_dir }}"
-        state: directory
-        mode: "0755"
-
     - name: Pull MongoDB Community image
       ansible.builtin.command:
         argv:
           - podman
           - pull
           - "{{ mongodb_image }}"
-      register: mongodb_pull
-      changed_when: "'Copying blob' in mongodb_pull.stdout"
+      changed_when: false
+
+    - name: Check MongoDB persistent volume
+      ansible.builtin.command:
+        argv:
+          - podman
+          - volume
+          - exists
+          - "{{ mongodb_volume_name }}"
+      register: mongodb_volume_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create MongoDB persistent volume
+      ansible.builtin.command:
+        argv:
+          - podman
+          - volume
+          - create
+          - "{{ mongodb_volume_name }}"
+      when: mongodb_volume_exists.rc != 0
 
     - name: Check existing MongoDB container
       ansible.builtin.command:
@@ -56,7 +70,7 @@
       changed_when: false
       failed_when: false
 
-    - name: Remove old MongoDB container if present
+    - name: Remove old MongoDB container
       ansible.builtin.command:
         argv:
           - podman
@@ -78,7 +92,7 @@
           - -p
           - "{{ mongodb_port }}:27017"
           - -v
-          - "{{ mongodb_data_dir }}:/data/db:Z"
+          - "{{ mongodb_volume_name }}:/data/db"
           - -e
           - "MONGO_INITDB_ROOT_USERNAME={{ mongo_root_username }}"
           - -e
@@ -86,24 +100,58 @@
           - "{{ mongodb_image }}"
       no_log: true
 
+    - name: Enable Podman restart service
+      ansible.builtin.systemd:
+        name: podman-restart.service
+        enabled: true
+        state: started
+
     - name: Wait for MongoDB port
       ansible.builtin.wait_for:
         host: "127.0.0.1"
         port: "{{ mongodb_port }}"
+        delay: 2
         timeout: 60
 
     - name: Check MongoDB container status
       ansible.builtin.command:
         argv:
           - podman
-          - ps
-          - --filter
-          - "name={{ mongodb_container_name }}"
+          - inspect
+          - "{{ mongodb_container_name }}"
           - --format
-          - "{{ '{{' }}.Names{{ '}}' }} {{ '{{' }}.Status{{ '}}' }}"
+          - "{{ '{{' }}.State.Status{{ '}}' }}"
       register: mongodb_status
       changed_when: false
 
-    - name: Show MongoDB status
+    - name: Validate MongoDB is running
+      ansible.builtin.assert:
+        that:
+          - mongodb_status.stdout | trim == "running"
+        fail_msg: "MongoDB container tidak dalam status running."
+        success_msg: "MongoDB container is running."
+
+    - name: Check MongoDB restart policy
+      ansible.builtin.command:
+        argv:
+          - podman
+          - inspect
+          - "{{ mongodb_container_name }}"
+          - --format
+          - "{{ '{{' }}.HostConfig.RestartPolicy.Name{{ '}}' }}"
+      register: mongodb_restart_policy
+      changed_when: false
+
+    - name: Validate MongoDB restart policy
+      ansible.builtin.assert:
+        that:
+          - mongodb_restart_policy.stdout | trim == "always"
+        fail_msg: "MongoDB restart policy bukan always."
+        success_msg: "MongoDB restart policy is always."
+
+    - name: Show MongoDB final status
       ansible.builtin.debug:
-        var: mongodb_status.stdout
+        msg:
+          - "MongoDB status: {{ mongodb_status.stdout }}"
+          - "MongoDB restart policy: {{ mongodb_restart_policy.stdout }}"
+          - "MongoDB port: {{ mongodb_port }}"
