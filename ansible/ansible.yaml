@@ -1,0 +1,109 @@
+---
+- name: Provision VM and MongoDB
+  hosts: all
+  become: true
+  any_errors_fatal: true
+
+  vars:
+    mongodb_image: "docker.io/mongodb/mongodb-community-server:8.0.32-ubi9-slim"
+    mongodb_container_name: "mongodb"
+    mongodb_port: 27017
+    mongodb_data_dir: "/opt/mongodb/data"
+
+  pre_tasks:
+
+    - name: Validate MongoDB credentials
+      ansible.builtin.assert:
+        that:
+          - mongo_root_username is defined
+          - mongo_root_username | length > 0
+          - mongo_root_password is defined
+          - mongo_root_password | length > 0
+        fail_msg: "MongoDB username dan password wajib diisi melalui AAP Survey."
+        quiet: true
+      no_log: true
+
+  tasks:
+
+    - name: Install Podman
+      ansible.builtin.dnf:
+        name: podman
+        state: present
+
+    - name: Create MongoDB persistent data directory
+      ansible.builtin.file:
+        path: "{{ mongodb_data_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Pull MongoDB Community image
+      ansible.builtin.command:
+        argv:
+          - podman
+          - pull
+          - "{{ mongodb_image }}"
+      register: mongodb_pull
+      changed_when: "'Copying blob' in mongodb_pull.stdout"
+
+    - name: Check existing MongoDB container
+      ansible.builtin.command:
+        argv:
+          - podman
+          - container
+          - exists
+          - "{{ mongodb_container_name }}"
+      register: mongodb_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Remove old MongoDB container if present
+      ansible.builtin.command:
+        argv:
+          - podman
+          - rm
+          - -f
+          - "{{ mongodb_container_name }}"
+      when: mongodb_exists.rc == 0
+
+    - name: Run MongoDB Community container
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - -d
+          - --name
+          - "{{ mongodb_container_name }}"
+          - --restart
+          - always
+          - -p
+          - "{{ mongodb_port }}:27017"
+          - -v
+          - "{{ mongodb_data_dir }}:/data/db:Z"
+          - -e
+          - "MONGO_INITDB_ROOT_USERNAME={{ mongo_root_username }}"
+          - -e
+          - "MONGO_INITDB_ROOT_PASSWORD={{ mongo_root_password }}"
+          - "{{ mongodb_image }}"
+      no_log: true
+
+    - name: Wait for MongoDB port
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ mongodb_port }}"
+        timeout: 60
+
+    - name: Check MongoDB container status
+      ansible.builtin.command:
+        argv:
+          - podman
+          - ps
+          - --filter
+          - "name={{ mongodb_container_name }}"
+          - --format
+          - "{{ '{{' }}.Names{{ '}}' }} {{ '{{' }}.Status{{ '}}' }}"
+      register: mongodb_status
+      changed_when: false
+
+    - name: Show MongoDB status
+      ansible.builtin.debug:
+        var: mongodb_status.stdout
